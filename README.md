@@ -1,4 +1,6 @@
-# PluraMath inference experiment code
+# PluraMath: Extending Mathematical Reasoning Evaluation Beyond High-Resource Languages
+
+## PluraMath inference experiment code
 
 This repository open-sources the code used to run the inference experiments for
 **PluraMath: Extending Mathematical Reasoning Evaluation Beyond High-Resource
@@ -13,7 +15,7 @@ constructs prompts with the language-specific final-answer instruction, sends
 the prompts through the selected provider, and writes one CSV per model,
 language, and prompting strategy.
 
-## Repository contents
+### Repository contents
 
 - `run_inference.py` - main Python entrypoint for one model/provider run.
 - `inference_class/` - provider wrappers for OpenAI-compatible APIs, AWS
@@ -39,7 +41,7 @@ language, and prompting strategy.
 Generated files are written under `experiment_output/` and `logs/`; those
 directories are intentionally ignored by git.
 
-## Setup
+### Setup
 
 Create an environment with the shared dependencies:
 
@@ -69,7 +71,7 @@ For gated Hugging Face models, set `HF_TOKEN=...` in the environment. The
 runner also accepts `--hf_token`, but environment variables avoid putting the
 token in the process command line.
 
-## Prompting strategies
+### Prompting strategies
 
 `run_inference.py` supports three experiment modes:
 
@@ -83,7 +85,7 @@ token in the process command line.
 
 Use `--prompting_strategy all` or launcher argument `all` to run all three.
 
-## Direct runner usage
+### Direct runner usage
 
 Run a single API-backed model over selected datasets:
 
@@ -126,7 +128,7 @@ python run_inference.py \
   --transformers_torch_dtype auto
 ```
 
-## Main experiment launchers
+### Main experiment launchers
 
 API-backed providers:
 
@@ -164,7 +166,7 @@ Slurm example:
 sbatch run_sbatch_transformers.sh
 ```
 
-## Outputs and resumability
+### Outputs and resumability
 
 Outputs are written as:
 
@@ -184,3 +186,70 @@ The runner stops a dataset if at least 5% of rows fail.
 
 Launcher logs are written under `logs/`, with one log per model/language or per
 model/prompting strategy depending on the launcher.
+
+## PluraMath Multilingual Evaluation Pipeline
+
+`pluramath_pipeline.py` is a single, dependency-light module that turns raw
+model-output spreadsheets into all the score / metric / length tables used in
+this multilingual mathematical-reasoning study.
+
+### Install
+
+```bash
+pip install openpyxl       # required
+pip install langdetect     # optional: output-language columns
+```
+
+### Input layout
+
+A *results folder* has one spreadsheet per language, `<lang>.xlsx`, each with
+one worksheet per difficulty level (`low`, `medium`, `high`, `top`) and columns:
+
+```
+id | answer | questions_translated | <model>__raw_answer | <model>__internal_reasoning | ...
+```
+
+`answer` (or `answer_translated`) is the gold solution. Chain-of-thought may be
+in the dedicated `__internal_reasoning` column or embedded in `__raw_answer`
+inside `<think>...</think>` — both are handled.
+
+For `combine`, a *strategy root* holds one results folder per prompt condition
+(e.g. `base/`, `base_encot/`, `bt/`).
+
+### Commands
+
+```bash
+# 1) Score one folder -> per-language xlsx (per-level + DW-ACC) + optional JSON
+python pluramath_pipeline.py score   RESULTS_DIR   -o scores_out/ [--json] [--fraction]
+
+# 2) Combine prompt conditions into one side-by-side comparison workbook
+python pluramath_pipeline.py combine STRATEGY_ROOT -o combined.xlsx [--conditions base base_encot bt] [--no-en-first]
+
+# 3) Extra metrics: boxed-format compliance, output language, reasoning/answer word-lengths
+python pluramath_pipeline.py extra   RESULTS_DIR   -o extra_out/
+
+# 4) Length stats workbook + LaTeX table (reasoning/answer/total)
+python pluramath_pipeline.py lengths RESULTS_DIR   -o lengths_out/ [--part total|reasoning|answer]
+```
+
+Every command is also importable:
+
+```python
+from pluramath_pipeline import (
+    evaluate_folder, save_results_xlsx,        # scoring
+    combine_scores,                            # comparison workbook
+    compute_extra_metrics_folder, save_extra_metrics_xlsx,
+    compute_length_stats, save_length_stats_xlsx, latex_length_table,
+)
+```
+
+### Metrics
+
+- **Per-level accuracy** — exact match of the last `\boxed{...}` (brace-balanced)
+  against the gold answer, with LaTeX-aware normalisation + numeric fallback.
+- **DW-ACC** — difficulty-weighted accuracy, weights `{low:1, medium:2, high:4,
+  top:8}`; denominator uses only the levels present.
+- **Extra** — boxed-format compliance %, dominant reasoning/answer language and
+  share (needs `langdetect`), and reasoning/answer length in words (mean ± std).
+- **Lengths** — per (language, model, level) mean ± std of reasoning, answer and
+  total tokens counts, plus a pooled `all` column.
