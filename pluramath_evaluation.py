@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-polymath_pipeline.py
+pluramath_pipeline.py
 ====================
 
 Consolidated evaluation + table-construction pipeline for the multilingual
-mathematical-reasoning study (PolyMath-style, difficulty-weighted accuracy).
+mathematical-reasoning study (PluraMath-style, difficulty-weighted accuracy).
 
 This single module bundles every data/metric/table-building step used in the
 project. It deliberately contains **no plotting code** -- only the
 computations that turn raw model-output spreadsheets into score tables,
 combined comparison tables, extra-metric tables (format compliance, output
-language, reasoning/answer lengths, optional perplexity) and LaTeX tables.
+language, reasoning/answer lengths) and LaTeX tables.
 
 --------------------------------------------------------------------------------
 INPUT FORMAT
@@ -43,34 +43,32 @@ METRICS
 * **Per-level accuracy** -- exact match of the last ``\\boxed{...}`` in a
   model's (reasoning + answer) text against the gold answer, with light
   LaTeX-aware normalisation and a numeric fallback.
-* **Difficulty-weighted accuracy (DW-ACC)** -- PolyMath weighting
+* **Difficulty-weighted accuracy (DW-ACC)** -- PluraMath weighting
   ``{low:1, medium:2, high:4, top:8}``; the denominator uses only the levels
   actually present, so subsets are handled correctly.
 * **Extra metrics** (per model x level): boxed-format compliance %, dominant
-  reasoning/answer language + share (needs ``langdetect``), reasoning/answer
-  length in tokens and words (mean ± std), and optional perplexity
-  (needs ``transformers``+``torch`` or Apple ``mlx-lm``).
+  reasoning/answer language + share (needs ``langdetect``), and reasoning/
+  answer length in words (mean ± std).
 
 --------------------------------------------------------------------------------
 COMMAND-LINE USAGE
 --------------------------------------------------------------------------------
     # 1) Score one results folder -> per-language xlsx + JSON summary
-    python polymath_pipeline.py score   RESULTS_DIR   -o scores_out/
+    python pluramath_pipeline.py score   RESULTS_DIR   -o scores_out/
 
     # 2) Combine several prompt conditions into one comparison workbook
-    python polymath_pipeline.py combine  STRATEGY_ROOT -o combined.xlsx
+    python pluramath_pipeline.py combine  STRATEGY_ROOT -o combined.xlsx
 
-    # 3) Extra metrics (compliance / language / lengths [/ perplexity])
-    python polymath_pipeline.py extra    RESULTS_DIR   -o extra_out/ \\
-        [--perplexity --lm-model Qwen/Qwen3-4B --backend auto]
+    # 3) Extra metrics (boxed-format compliance / output language / lengths)
+    python pluramath_pipeline.py extra    RESULTS_DIR   -o extra_out/
 
     # 4) Length tables (per-language + grouped LaTeX, length_stats.xlsx)
-    python polymath_pipeline.py lengths  RESULTS_DIR   -o lengths_out/
+    python pluramath_pipeline.py lengths  RESULTS_DIR   -o lengths_out/
 
 Each subcommand is also a plain importable function (see ``__all__``).
 
-Dependencies: ``openpyxl`` (required); ``langdetect`` (optional, language
-columns); ``transformers``+``torch`` or ``mlx-lm`` (optional, perplexity).
+Dependencies: ``openpyxl`` (required); ``langdetect`` (optional, output-language
+columns).
 """
 
 from __future__ import annotations
@@ -245,7 +243,7 @@ def difficulty_weighted_accuracy(
     per_level_acc: Dict[str, Dict[str, float]],
     levels: Optional[Iterable[str]] = None,
 ) -> Dict[str, float]:
-    """Aggregate ``{level:{model:acc}}`` with PolyMath difficulty weights.
+    """Aggregate ``{level:{model:acc}}`` with PluraMath difficulty weights.
 
     The denominator sums only the weights of levels that are present for a
     model, so evaluating on a subset of levels stays correctly normalised.
@@ -567,31 +565,22 @@ class _LangDetector:
 
 def compute_extra_metrics_folder(
     folder: str | Path,
-    use_perplexity: bool = False,
-    lm_model: str = "Qwen/Qwen3-4B",
-    backend: str = "auto",
     verbose: bool = True,
 ) -> Dict[str, Dict]:
     """Compute extra metrics for every ``<lang>.xlsx`` in ``folder``.
 
     Returns ``{lang: {level: {model: {metric: value}}}}`` with metrics:
     ``boxed_compliance_pct``, ``reasoning_lang`` (+``_pct``),
-    ``answer_lang`` (+``_pct``), ``reasoning_len_words``/``answer_len_words``
-    as ``"mean ± std"`` strings, and (if ``use_perplexity``) token lengths and
-    perplexity. Perplexity needs ``transformers``+``torch`` or ``mlx-lm``;
-    when unavailable those cells read ``"NA (no LM)"``.
+    ``answer_lang`` (+``_pct``), and ``reasoning_len_words`` /
+    ``answer_len_words`` as ``"mean ± std"`` strings.
 
-    NOTE: the heavy perplexity scorer is intentionally lazy/optional so this
-    module imports and runs with only ``openpyxl`` installed.
+    Language columns require ``langdetect``; if it is unavailable those cells
+    read ``"NA (no langdetect)"``. Everything else needs only ``openpyxl``.
     """
     folder = Path(folder)
     langdet = _LangDetector()
-    if use_perplexity and verbose and not langdet.available:
+    if verbose and not langdet.available:
         print("[extra] langdetect unavailable -> language cols 'NA (no langdetect)'")
-
-    scorer = None
-    if use_perplexity:
-        scorer = _try_load_perplexity(lm_model, backend, verbose)
 
     out: Dict[str, Dict] = {}
     for xlsx in sorted(folder.glob("*.xlsx")):
@@ -603,12 +592,12 @@ def compute_extra_metrics_folder(
         for sn in wb.sheetnames:
             if sn not in LEVEL_WEIGHTS:
                 continue
-            out[lang][sn] = _compute_sheet_extra(wb[sn], langdet, scorer)
+            out[lang][sn] = _compute_sheet_extra(wb[sn], langdet)
         wb.close()
     return out
 
 
-def _compute_sheet_extra(sheet, langdet, scorer) -> Dict[str, Dict]:
+def _compute_sheet_extra(sheet, langdet) -> Dict[str, Dict]:
     rows = list(sheet.iter_rows(values_only=True))
     if not rows:
         return {}
@@ -626,10 +615,6 @@ def _compute_sheet_extra(sheet, langdet, scorer) -> Dict[str, Dict]:
         ans_langs: List[Optional[str]] = []
         rea_words: List[Optional[float]] = []
         ans_words: List[Optional[float]] = []
-        rea_tok: List[Optional[float]] = []
-        ans_tok: List[Optional[float]] = []
-        rea_ppl: List[Optional[float]] = []
-        ans_ppl: List[Optional[float]] = []
 
         for raw_row in body:
             row = _padded(raw_row, n)
@@ -650,15 +635,8 @@ def _compute_sheet_extra(sheet, langdet, scorer) -> Dict[str, Dict]:
             rea_words.append(_word_count(reasoning))
             ans_words.append(_word_count(answer))
 
-            if scorer is not None:
-                rea_tok.append(scorer.count_tokens(reasoning))
-                ans_tok.append(scorer.count_tokens(answer))
-                rea_ppl.append(scorer.perplexity(reasoning))
-                ans_ppl.append(scorer.perplexity(answer))
-
         rlang, rshare = _mode_and_share(rea_langs)
         alang, ashare = _mode_and_share(ans_langs)
-        tok_sentinel = "NA (no LM)" if scorer is None else None
 
         result[model] = {
             "n_instances": n_inst,
@@ -671,10 +649,6 @@ def _compute_sheet_extra(sheet, langdet, scorer) -> Dict[str, Dict]:
             "answer_lang_pct": round(100.0 * ashare, 1),
             "reasoning_len_words": _fmt_mean_std(rea_words),
             "answer_len_words": _fmt_mean_std(ans_words),
-            "reasoning_len_tokens": tok_sentinel or _fmt_mean_std(rea_tok),
-            "answer_len_tokens": tok_sentinel or _fmt_mean_std(ans_tok),
-            "reasoning_perplexity": tok_sentinel or _fmt_mean_std(rea_ppl),
-            "answer_perplexity": tok_sentinel or _fmt_mean_std(ans_ppl),
         }
     return result
 
@@ -686,12 +660,8 @@ _EXTRA_COLUMNS = [
     ("reasoning_lang_pct", "reasoning_lang_%"),
     ("answer_lang", "answer_lang"),
     ("answer_lang_pct", "answer_lang_%"),
-    ("reasoning_len_tokens", "reasoning_len_tokens (mean±std)"),
     ("reasoning_len_words", "reasoning_len_words (mean±std)"),
-    ("reasoning_perplexity", "reasoning_perplexity (mean±std)"),
-    ("answer_len_tokens", "answer_len_tokens (mean±std)"),
     ("answer_len_words", "answer_len_words (mean±std)"),
-    ("answer_perplexity", "answer_perplexity (mean±std)"),
 ]
 
 
@@ -717,110 +687,6 @@ def save_extra_metrics_xlsx(
         wb.save(path)
         written.append(path)
     return written
-
-
-def _try_load_perplexity(lm_model: str, backend: str, verbose: bool):
-    """Return a loaded perplexity scorer, or ``None`` if deps are missing."""
-    try:
-        scorer = _PerplexityScorer(lm_model, backend=backend, verbose=verbose)
-        return scorer if scorer.load() else None
-    except Exception as exc:  # noqa: BLE001
-        if verbose:
-            print(f"[extra] perplexity disabled: {exc}")
-        return None
-
-
-def _looks_like_mlx(name: str) -> bool:
-    n = name.lower()
-    return (n.startswith("mlx-community/") or "/mlx-" in n
-            or n.endswith("-mlx") or (n.endswith("bit") and "mlx" in n))
-
-
-class _PerplexityScorer:
-    """Optional causal-LM perplexity scorer (HF Transformers or Apple MLX).
-
-    Loaded lazily; if the relevant libraries/model are unavailable, ``load()``
-    returns ``False`` and the caller falls back to ``"NA (no LM)"`` sentinels.
-    """
-
-    def __init__(self, model_name: str, max_chars: int = 4000,
-                 backend: str = "auto", verbose: bool = False) -> None:
-        self.model_name = model_name
-        self.max_chars = max_chars
-        self.verbose = verbose
-        self.backend = ("mlx" if _looks_like_mlx(model_name) else "hf") \
-            if backend == "auto" else backend
-        self._ok = False
-        self._tok = self._model = self._torch = self._mx = None
-
-    def load(self) -> bool:
-        if self._ok:
-            return True
-        try:
-            if self.backend == "mlx":
-                import mlx.core as mx           # type: ignore
-                from mlx_lm import load          # type: ignore
-                self._mx = mx
-                self._model, self._tok = load(self.model_name)
-            else:
-                import torch                      # type: ignore
-                from transformers import (AutoTokenizer,  # type: ignore
-                                          AutoModelForCausalLM)
-                self._torch = torch
-                self._tok = AutoTokenizer.from_pretrained(self.model_name)
-                dtype = torch.float16 if torch.cuda.is_available() else None
-                self._model = AutoModelForCausalLM.from_pretrained(
-                    self.model_name, torch_dtype=dtype)
-                self._model.eval()
-                if torch.cuda.is_available():
-                    self._model.to("cuda")
-            self._ok = True
-        except Exception as exc:  # noqa: BLE001
-            if self.verbose:
-                print(f"[extra] LM '{self.model_name}' "
-                      f"(backend={self.backend}) failed: "
-                      f"{type(exc).__name__}: {exc}")
-            self._ok = False
-        return self._ok
-
-    def count_tokens(self, text: Optional[str]) -> Optional[int]:
-        if not self._ok or not text:
-            return None
-        if self.backend == "mlx":
-            return len(self._tok.encode(str(text)))
-        return len(self._tok(str(text), add_special_tokens=False)["input_ids"])
-
-    def perplexity(self, text: Optional[str]) -> Optional[float]:
-        if not self._ok or not text:
-            return None
-        s = str(text)[: self.max_chars]
-        if not s.strip():
-            return None
-        if self.backend == "mlx":
-            import mlx.nn as nn                   # type: ignore
-            ids = self._tok.encode(s)[:2048]
-            if len(ids) < 2:
-                return None
-            tok = self._mx.array(ids)[None]
-            logits = self._model(tok[:, :-1])
-            loss = nn.losses.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]), tok[:, 1:].reshape(-1))
-            try:
-                return math.exp(float(self._mx.mean(loss)))
-            except OverflowError:
-                return float("inf")
-        torch = self._torch
-        enc = self._tok(s, return_tensors="pt", truncation=True, max_length=2048)
-        ids = enc["input_ids"]
-        if ids.shape[1] < 2:
-            return None
-        ids = ids.to(next(self._model.parameters()).device)
-        with torch.no_grad():
-            loss = float(self._model(ids, labels=ids).loss)
-        try:
-            return math.exp(loss)
-        except OverflowError:
-            return float("inf")
 
 
 # ============================================================================
@@ -954,7 +820,7 @@ def latex_length_table(
 # ============================================================================
 def _cli() -> None:
     ap = argparse.ArgumentParser(
-        description="PolyMath multilingual evaluation + table pipeline.")
+        description="PluraMath multilingual evaluation + table pipeline.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("score", help="Per-level + DW-ACC scores for a folder.")
@@ -974,9 +840,6 @@ def _cli() -> None:
     p = sub.add_parser("extra", help="Extra metrics (compliance/lang/length).")
     p.add_argument("results_dir")
     p.add_argument("-o", "--out-dir", default="extra_out")
-    p.add_argument("--perplexity", action="store_true")
-    p.add_argument("--lm-model", default="Qwen/Qwen3-4B")
-    p.add_argument("--backend", choices=["auto", "hf", "mlx"], default="auto")
 
     p = sub.add_parser("lengths", help="Length stats xlsx + LaTeX table.")
     p.add_argument("results_dir")
@@ -1004,9 +867,7 @@ def _cli() -> None:
         print(f"Wrote {out}")
 
     elif args.cmd == "extra":
-        metrics = compute_extra_metrics_folder(
-            args.results_dir, use_perplexity=args.perplexity,
-            lm_model=args.lm_model, backend=args.backend)
+        metrics = compute_extra_metrics_folder(args.results_dir)
         paths = save_extra_metrics_xlsx(metrics, args.out_dir)
         print(f"Wrote {len(paths)} files to {args.out_dir}")
 
