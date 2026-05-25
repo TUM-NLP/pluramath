@@ -2,6 +2,22 @@
 
 This repository contains of inference and results evaluation code for our novel **PluraMath** benchmark.
 
+## Table of Contents
+
+- [PluraMath inference experiment code](#pluramath-inference-experiment-code)
+  - [Repository contents](#repository-contents)
+  - [Setup](#setup)
+  - [Prompting strategies](#prompting-strategies)
+  - [Direct runner usage](#direct-runner-usage)
+  - [Main experiment launchers](#main-experiment-launchers)
+  - [Outputs and resumability](#outputs-and-resumability)
+- [PluraMath Multilingual Evaluation Pipeline](#pluramath-multilingual-evaluation-pipeline)
+  - [Install](#install)
+  - [Input layout](#input-layout)
+  - [Commands](#commands)
+  - [Metrics](#metrics)
+  - [Notes](#notes)
+
 ## PluraMath inference experiment code
 
 This repository open-sources the code used to run the inference experiments for
