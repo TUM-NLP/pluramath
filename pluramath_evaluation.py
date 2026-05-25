@@ -48,7 +48,7 @@ METRICS
   actually present, so subsets are handled correctly.
 * **Extra metrics** (per model x level): boxed-format compliance %, dominant
   reasoning/answer language + share (needs ``langdetect``), and reasoning/
-  answer length in words (mean ± std).
+  answer length in TOKENS (mean ± std), counted with an LLM tokenizer.
 
 --------------------------------------------------------------------------------
 COMMAND-LINE USAGE
@@ -59,15 +59,18 @@ COMMAND-LINE USAGE
     # 2) Combine several prompt conditions into one comparison workbook
     python pluramath_pipeline.py combine  STRATEGY_ROOT -o combined.xlsx
 
-    # 3) Extra metrics (boxed-format compliance / output language / lengths)
-    python pluramath_pipeline.py extra    RESULTS_DIR   -o extra_out/
+    # 3) Extra metrics (boxed-format compliance / output language / token lengths)
+    python pluramath_pipeline.py extra    RESULTS_DIR   -o extra_out/ \\
+        [--tokenizer Qwen/Qwen3-4B]
 
-    # 4) Length tables (per-language + grouped LaTeX, length_stats.xlsx)
-    python pluramath_pipeline.py lengths  RESULTS_DIR   -o lengths_out/
+    # 4) Length tables in tokens (per-language + LaTeX, length_stats.xlsx)
+    python pluramath_pipeline.py lengths  RESULTS_DIR   -o lengths_out/ \\
+        [--tokenizer Qwen/Qwen3-4B]
 
 Each subcommand is also a plain importable function (see ``__all__``).
 
-Dependencies: ``openpyxl`` (required); ``langdetect`` (optional, output-language
+Dependencies: ``openpyxl`` (required); ``transformers`` (+ the tokenizer's
+backend) for token-length counts; ``langdetect`` (optional, output-language
 columns).
 """
 
@@ -91,6 +94,7 @@ __all__ = [
     "combine_scores",
     "split_reasoning_answer", "compute_extra_metrics_folder",
     "save_extra_metrics_xlsx",
+    "set_tokenizer",
     "compute_length_stats", "save_length_stats_xlsx",
     "latex_length_table",
 ]
@@ -521,6 +525,39 @@ def _word_count(text: Optional[str]) -> Optional[int]:
     return len(str(text).split())
 
 
+# --- LLM token counting (Qwen base tokenizer by default) -------------------
+# Lengths are measured in TOKENS using a real tokenizer. The tokenizer is a
+# lazy singleton so the module imports with only ``openpyxl`` present; it is
+# loaded the first time a token count is requested.
+DEFAULT_TOKENIZER = "Qwen/Qwen3-4B"
+_TOKENIZER = None
+_TOKENIZER_NAME = DEFAULT_TOKENIZER
+
+
+def set_tokenizer(name: str) -> None:
+    """Set the HF tokenizer id used for token counts (resets the cache)."""
+    global _TOKENIZER, _TOKENIZER_NAME
+    _TOKENIZER_NAME = name
+    _TOKENIZER = None
+
+
+def _tokenizer():
+    """Load the HF tokenizer once. ``trust_remote_code`` for custom tokenizers."""
+    global _TOKENIZER
+    if _TOKENIZER is None:
+        from transformers import AutoTokenizer  # lazy: only needed for tokens
+        _TOKENIZER = AutoTokenizer.from_pretrained(
+            _TOKENIZER_NAME, trust_remote_code=True)
+    return _TOKENIZER
+
+
+def _token_count(text: Optional[str]) -> Optional[int]:
+    """Number of tokens in ``text`` under the configured tokenizer."""
+    if not text:
+        return None
+    return len(_tokenizer().encode(str(text), add_special_tokens=False))
+
+
 def _mode_and_share(labels: List[Optional[str]]) -> Tuple[Optional[str], float]:
     vals = [x for x in labels if x]
     if not vals:
@@ -571,8 +608,8 @@ def compute_extra_metrics_folder(
 
     Returns ``{lang: {level: {model: {metric: value}}}}`` with metrics:
     ``boxed_compliance_pct``, ``reasoning_lang`` (+``_pct``),
-    ``answer_lang`` (+``_pct``), and ``reasoning_len_words`` /
-    ``answer_len_words`` as ``"mean ± std"`` strings.
+    ``answer_lang`` (+``_pct``), and ``reasoning_len_tokens`` /
+    ``answer_len_tokens`` as ``"mean ± std"`` strings (LLM-tokenizer counts).
 
     Language columns require ``langdetect``; if it is unavailable those cells
     read ``"NA (no langdetect)"``. Everything else needs only ``openpyxl``.
@@ -613,8 +650,8 @@ def _compute_sheet_extra(sheet, langdet) -> Dict[str, Dict]:
         boxed_ok = 0
         rea_langs: List[Optional[str]] = []
         ans_langs: List[Optional[str]] = []
-        rea_words: List[Optional[float]] = []
-        ans_words: List[Optional[float]] = []
+        rea_toks: List[Optional[float]] = []
+        ans_toks: List[Optional[float]] = []
 
         for raw_row in body:
             row = _padded(raw_row, n)
@@ -632,8 +669,8 @@ def _compute_sheet_extra(sheet, langdet) -> Dict[str, Dict]:
 
             rea_langs.append(langdet.detect(reasoning))
             ans_langs.append(langdet.detect(answer))
-            rea_words.append(_word_count(reasoning))
-            ans_words.append(_word_count(answer))
+            rea_toks.append(_token_count(reasoning))
+            ans_toks.append(_token_count(answer))
 
         rlang, rshare = _mode_and_share(rea_langs)
         alang, ashare = _mode_and_share(ans_langs)
@@ -647,8 +684,8 @@ def _compute_sheet_extra(sheet, langdet) -> Dict[str, Dict]:
             "answer_lang": alang or ("NA (no langdetect)"
                                      if not langdet.available else None),
             "answer_lang_pct": round(100.0 * ashare, 1),
-            "reasoning_len_words": _fmt_mean_std(rea_words),
-            "answer_len_words": _fmt_mean_std(ans_words),
+            "reasoning_len_tokens": _fmt_mean_std(rea_toks),
+            "answer_len_tokens": _fmt_mean_std(ans_toks),
         }
     return result
 
@@ -660,8 +697,8 @@ _EXTRA_COLUMNS = [
     ("reasoning_lang_pct", "reasoning_lang_%"),
     ("answer_lang", "answer_lang"),
     ("answer_lang_pct", "answer_lang_%"),
-    ("reasoning_len_words", "reasoning_len_words (mean±std)"),
-    ("answer_len_words", "answer_len_words (mean±std)"),
+    ("reasoning_len_tokens", "reasoning_len_tokens (mean±std)"),
+    ("answer_len_tokens", "answer_len_tokens (mean±std)"),
 ]
 
 
@@ -693,14 +730,15 @@ def save_extra_metrics_xlsx(
 # 5. Length statistics + LaTeX tables.
 # ============================================================================
 def compute_length_stats(
-    folder: str | Path, unit: str = "words",
+    folder: str | Path, unit: str = "tokens",
 ) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
     """Per (lang, model, level) mean+std of reasoning/answer/total lengths.
 
-    ``unit="words"`` uses whitespace token counts (no extra dependencies).
-    Returns ``{lang: {model: {level: {part: {"mean":.., "std":..}}}}}`` where
-    ``part`` in ``{"reasoning","answer","total"}`` and ``level`` also includes
-    ``"all"`` (pooled across levels).
+    Lengths are counted in TOKENS with the configured LLM tokenizer (see
+    :func:`set_tokenizer`). Returns
+    ``{lang: {model: {level: {part: {"mean":.., "std":..}}}}}`` where ``part``
+    in ``{"reasoning","answer","total"}`` and ``level`` also includes ``"all"``
+    (pooled across levels).
     """
     folder = Path(folder)
     out: Dict = {}
@@ -709,7 +747,7 @@ def compute_length_stats(
             continue
         lang = xlsx.stem
         wb = openpyxl.load_workbook(xlsx, read_only=True, data_only=True)
-        # collect raw per-sample word counts: [model][level][part] -> list
+        # collect raw per-sample token counts: [model][level][part] -> list
         raw: Dict[str, Dict[str, Dict[str, List[int]]]] = {}
         for sn in wb.sheetnames:
             if sn not in LEVEL_WEIGHTS:
@@ -728,8 +766,8 @@ def compute_length_stats(
                     if raw_v is None and rea_v is None:
                         continue
                     reasoning, answer = split_reasoning_answer(raw_v, rea_v)
-                    rc = _word_count(reasoning) or 0
-                    ac = _word_count(answer) or 0
+                    rc = _token_count(reasoning) or 0
+                    ac = _token_count(answer) or 0
                     md = raw.setdefault(model, {}).setdefault(
                         sn, {"reasoning": [], "answer": [], "total": []})
                     md["reasoning"].append(rc)
@@ -762,7 +800,7 @@ def compute_length_stats(
 
 
 def save_length_stats_xlsx(
-    stats: Dict, out_path: str | Path, part: str = "total", unit: str = "words",
+    stats: Dict, out_path: str | Path, part: str = "total", unit: str = "tokens",
 ) -> Path:
     """Write a ``length_stats.xlsx`` (one sheet per language).
 
@@ -791,7 +829,7 @@ def save_length_stats_xlsx(
 
 def latex_length_table(
     stats: Dict, languages: Sequence[str], part: str = "total",
-    caption: str = "Output length (words, mean).",
+    caption: str = "Output length (tokens, mean).",
     label: str = "tab:lengths",
 ) -> str:
     """Return a booktabs LaTeX table of per-model 'all' mean length, one
@@ -840,12 +878,16 @@ def _cli() -> None:
     p = sub.add_parser("extra", help="Extra metrics (compliance/lang/length).")
     p.add_argument("results_dir")
     p.add_argument("-o", "--out-dir", default="extra_out")
+    p.add_argument("--tokenizer", default=DEFAULT_TOKENIZER,
+                   help="HF tokenizer id for token-length counts.")
 
     p = sub.add_parser("lengths", help="Length stats xlsx + LaTeX table.")
     p.add_argument("results_dir")
     p.add_argument("-o", "--out-dir", default="lengths_out")
     p.add_argument("--part", choices=["reasoning", "answer", "total"],
                    default="total")
+    p.add_argument("--tokenizer", default=DEFAULT_TOKENIZER,
+                   help="HF tokenizer id for token-length counts.")
 
     args = ap.parse_args()
 
@@ -867,11 +909,13 @@ def _cli() -> None:
         print(f"Wrote {out}")
 
     elif args.cmd == "extra":
+        set_tokenizer(args.tokenizer)
         metrics = compute_extra_metrics_folder(args.results_dir)
         paths = save_extra_metrics_xlsx(metrics, args.out_dir)
         print(f"Wrote {len(paths)} files to {args.out_dir}")
 
     elif args.cmd == "lengths":
+        set_tokenizer(args.tokenizer)
         out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
         stats = compute_length_stats(args.results_dir)
         xp = save_length_stats_xlsx(stats, out_dir / "length_stats.xlsx",
