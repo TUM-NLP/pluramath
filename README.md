@@ -1,5 +1,7 @@
 # PluraMath: Extending Mathematical Reasoning Evaluation Beyond High-Resource Languages
 
+This repository contains of inference and results evaluation code for our novel **PluraMath** benchmark.
+
 ## PluraMath inference experiment code
 
 This repository open-sources the code used to run the inference experiments for
@@ -191,13 +193,15 @@ model/prompting strategy depending on the launcher.
 
 `pluramath_pipeline.py` is a single, dependency-light module that turns raw
 model-output spreadsheets into all the score / metric / length tables used in
-this multilingual mathematical-reasoning study.
+the multilingual mathematical-reasoning study. **No plotting** — only data and
+table construction.
 
 ### Install
 
 ```bash
 pip install openpyxl       # required
-pip install langdetect     # optional: output-language columns
+pip install transformers    # token-length counts (extra / lengths)
+pip install langdetect      # optional: output-language columns
 ```
 
 ### Input layout
@@ -226,10 +230,10 @@ python pluramath_pipeline.py score   RESULTS_DIR   -o scores_out/ [--json] [--fr
 python pluramath_pipeline.py combine STRATEGY_ROOT -o combined.xlsx [--conditions base base_encot bt] [--no-en-first]
 
 # 3) Extra metrics: boxed-format compliance, output language, reasoning/answer word-lengths
-python pluramath_pipeline.py extra   RESULTS_DIR   -o extra_out/
+python pluramath_pipeline.py extra   RESULTS_DIR   -o extra_out/ [--tokenizer Qwen/Qwen3-4B]
 
 # 4) Length stats workbook + LaTeX table (reasoning/answer/total)
-python pluramath_pipeline.py lengths RESULTS_DIR   -o lengths_out/ [--part total|reasoning|answer]
+python pluramath_pipeline.py lengths RESULTS_DIR   -o lengths_out/ [--part total|reasoning|answer] [--tokenizer Qwen/Qwen3-4B]
 ```
 
 Every command is also importable:
@@ -250,6 +254,16 @@ from pluramath_pipeline import (
 - **DW-ACC** — difficulty-weighted accuracy, weights `{low:1, medium:2, high:4,
   top:8}`; denominator uses only the levels present.
 - **Extra** — boxed-format compliance %, dominant reasoning/answer language and
-  share (needs `langdetect`), and reasoning/answer length in words (mean ± std).
+  share (needs `langdetect`), and reasoning/answer length in **tokens** (mean ± std),
+  counted with an LLM tokenizer (`--tokenizer`, default `Qwen/Qwen3-4B`).
 - **Lengths** — per (language, model, level) mean ± std of reasoning, answer and
-  total tokens counts, plus a pooled `all` column.
+  total token counts, plus a pooled `all` column.
+
+### Notes
+
+- Lengths are measured in **tokens** via a real LLM tokenizer (default
+  `Qwen/Qwen3-4B`); set another with `--tokenizer` or `set_tokenizer(name)`.
+  This needs `transformers` (+ the tokenizer backend).
+- Language columns require `langdetect`; without it those cells read
+  `NA (no langdetect)` and the run still completes.
+- Excel lock files (`~$*.xlsx`) are skipped automatically.
